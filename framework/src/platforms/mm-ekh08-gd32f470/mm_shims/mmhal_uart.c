@@ -1,0 +1,306 @@
+/**
+ * Copyright 2026 Morse Micro
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * @file
+ * This File implements platform specific shims for accessing the data-link transport.
+ */
+
+#include "mm_hal_common.h"
+#include "mmhal_uart.h"
+#include "mmosal.h"
+#include "mmutils.h"
+#include "main.h"
+
+#ifndef ENABLE_UART_HAL
+#define ENABLE_UART_HAL (0)
+#endif
+
+#if ENABLE_UART_HAL
+
+/*
+ * The implementation of the UART HAL contained herein uses the same UART as the log UART.
+ * Therefore log output via UART must be disabled to use this HAL. The reason the same UART
+ * is used is that on this platform this is the UART that is connected via the debug probe.
+ * However, if this HAL were to be modified to use another UART then both could be used
+ * simultaneously.
+ */
+#ifndef DISABLE_UART_LOG
+#error "Unable to build UART HAL with UART logging enabled. Please define DISABLE_UART_LOG"
+#endif
+
+#define UART_INTERFACE   LOG_USART
+#define UART_IRQ_HANDLER LOG_USART_IRQ_HANDLER
+
+/** Size of the receive ring buffer. */
+#define RX_RINGBUF_SIZE (128)
+/** Add the given value to a RX ringbuf index, taking into account wrapping. */
+#define RX_RINGBUF_IDX_ADD(_x, _y) (((_x) + (_y)) % RX_RINGBUF_SIZE)
+
+/** RX thread stack size in 32 bit words */
+#define RX_THREAD_STACK_SIZE_WORDS (768)
+/** RX thread priority */
+#define RX_THREAD_PRIORITY (MMOSAL_TASK_PRI_NORM)
+
+/** Data structure UART HAL global state. */
+struct mmhal_uart_data
+{
+    mmhal_uart_rx_cb_t rx_cb;
+    void *rx_cb_arg;
+
+    struct
+    {
+        struct mmosal_task *handle;
+        struct mmosal_semb *semb;
+        volatile bool run;
+        volatile bool complete;
+    } rx_thread;
+
+    struct
+    {
+        uint8_t buf[RX_RINGBUF_SIZE];
+        volatile size_t write_idx;
+        volatile size_t read_idx;
+    } rx_ringbuf;
+};
+
+static struct mmhal_uart_data mmhal_uart;
+
+/**
+ * Process data in the RX ringbuffer and invoke the callback if there is any data available.
+ *
+ * @return @c true if there might still be more data in the ringbuf; @c false if all data that
+ *         was in the ringbuf at the time this function was called has been processed.
+ */
+static bool uart_rx_process(void)
+{
+    size_t snapshot_rx_rd_idx;
+    size_t snapshot_rx_wr_idx;
+    size_t new_rd_idx;
+    ssize_t rx_available;
+
+    snapshot_rx_rd_idx = mmhal_uart.rx_ringbuf.read_idx;
+    snapshot_rx_wr_idx = mmhal_uart.rx_ringbuf.write_idx;
+    rx_available = snapshot_rx_wr_idx - snapshot_rx_rd_idx;
+
+    if (rx_available != 0)
+    {
+        /* Account for wrapping */
+        if (rx_available < 0)
+        {
+            rx_available = sizeof(mmhal_uart.rx_ringbuf.buf) - snapshot_rx_rd_idx;
+            new_rd_idx = 0;
+        }
+        else
+        {
+            new_rd_idx = snapshot_rx_rd_idx + rx_available;
+        }
+
+        if (mmhal_uart.rx_cb)
+        {
+            mmhal_uart.rx_cb(&mmhal_uart.rx_ringbuf.buf[snapshot_rx_rd_idx],
+                             rx_available,
+                             mmhal_uart.rx_cb_arg);
+        }
+
+        mmhal_uart.rx_ringbuf.read_idx = new_rd_idx;
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+static void uart_rx_ringbuf_put(uint8_t c)
+{
+    size_t snapshot_rx_wr_idx = mmhal_uart.rx_ringbuf.write_idx;
+    size_t snapshot_rx_rd_idx = mmhal_uart.rx_ringbuf.read_idx;
+    size_t next_wr_idx = snapshot_rx_wr_idx + 1;
+    if (next_wr_idx >= sizeof(mmhal_uart.rx_ringbuf.buf))
+    {
+        next_wr_idx = 0;
+    }
+
+    if (next_wr_idx == snapshot_rx_rd_idx)
+    {
+        /* RX buffer full; drop incoming data */
+        return;
+    }
+
+    mmhal_uart.rx_ringbuf.buf[snapshot_rx_wr_idx] = c;
+    mmhal_uart.rx_ringbuf.write_idx = next_wr_idx;
+}
+
+static void uart_rx_main(void *arg)
+{
+    MM_UNUSED(arg);
+
+    while (mmhal_uart.rx_thread.run)
+    {
+        bool more_data_pending = uart_rx_process();
+        if (!more_data_pending)
+        {
+            mmosal_semb_wait(mmhal_uart.rx_thread.semb, UINT32_MAX);
+        }
+    }
+
+    mmhal_uart.rx_thread.complete = true;
+}
+
+void mmhal_uart_init(mmhal_uart_rx_cb_t rx_cb, void *rx_cb_arg)
+{
+    memset(&mmhal_uart, 0, sizeof(mmhal_uart));
+    mmhal_uart.rx_cb = rx_cb;
+    mmhal_uart.rx_cb_arg = rx_cb_arg;
+
+    mmhal_uart.rx_thread.semb = mmosal_semb_create("uartsemb");
+    MMOSAL_ASSERT(mmhal_uart.rx_thread.semb != NULL);
+
+    mmhal_uart.rx_thread.run = true;
+    mmhal_uart.rx_thread.handle = mmosal_task_create(uart_rx_main,
+                                                     NULL,
+                                                     RX_THREAD_PRIORITY,
+                                                     RX_THREAD_STACK_SIZE_WORDS,
+                                                     "uart");
+
+    /* Enable RX interrupts */
+    usart_interrupt_enable(UART_INTERFACE, USART_INT_RBNE);
+}
+
+void mmhal_uart_deinit(void)
+{
+    if (mmhal_uart.rx_thread.handle != NULL)
+    {
+        mmhal_uart.rx_thread.run = false;
+        mmosal_semb_give(mmhal_uart.rx_thread.semb);
+        while (!mmhal_uart.rx_thread.complete)
+        {
+            mmosal_task_sleep(3);
+        }
+        mmhal_uart.rx_thread.handle = NULL;
+    }
+
+    if (mmhal_uart.rx_thread.semb != NULL)
+    {
+        mmosal_semb_delete(mmhal_uart.rx_thread.semb);
+        mmhal_uart.rx_thread.semb = NULL;
+    }
+
+    usart_interrupt_disable(UART_INTERFACE, USART_INT_RBNE);
+}
+
+void mmhal_uart_tx(const uint8_t *tx_data, size_t length)
+{
+    while (length-- != 0)
+    {
+        while (!usart_flag_get(UART_INTERFACE, USART_FLAG_TBE))
+        {
+        }
+        usart_data_transmit(UART_INTERFACE, *tx_data++);
+    }
+}
+
+bool mmhal_uart_set_deep_sleep_mode(enum mmhal_uart_deep_sleep_mode mode)
+{
+    if (mode == MMHAL_UART_DEEP_SLEEP_ONE_SHOT)
+    {
+        /* Setup USART_RX line as interrupt */
+        syscfg_exti_line_config(LOG_USART_RX_EXTI_Port, LOG_USART_RX_EXTI_Line);
+        exti_init(LOG_USART_RX_IRQ_LINE, EXTI_INTERRUPT, EXTI_TRIG_FALLING);
+        NVIC_SetPriority(LOG_USART_RX_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(), 15, 0));
+        exti_interrupt_flag_clear(LOG_USART_RX_IRQ_LINE);
+        NVIC_EnableIRQ(LOG_USART_RX_IRQn);
+        mmhal_clear_deep_sleep_veto(MMHAL_VETO_ID_HAL_UART);
+        return true;
+    }
+    else if (mode == MMHAL_UART_DEEP_SLEEP_DISABLED)
+    {
+        mmhal_set_deep_sleep_veto(MMHAL_VETO_ID_HAL_UART);
+        NVIC_DisableIRQ(LOG_USART_RX_IRQn);
+        exti_interrupt_flag_clear(LOG_USART_RX_IRQ_LINE);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * This function handles UART RX falling edge interrupt.
+ */
+#ifndef LOG_USART_RX_IRQ_HANDLER
+#error Must define alias macro
+#endif
+void LOG_USART_RX_IRQ_HANDLER(void)
+{
+    if (exti_interrupt_flag_get(LOG_USART_RX_IRQ_LINE))
+    {
+        mmhal_uart_set_deep_sleep_mode(MMHAL_UART_DEEP_SLEEP_DISABLED);
+    }
+}
+
+void UART_IRQ_HANDLER(void)
+{
+    while (usart_interrupt_flag_get(UART_INTERFACE, USART_INT_RBNE))
+    {
+        uart_rx_ringbuf_put((uint8_t)usart_data_receive(UART_INTERFACE));
+        if (mmhal_uart.rx_thread.handle != NULL)
+        {
+            mmosal_semb_give_from_isr(mmhal_uart.rx_thread.semb);
+        }
+    }
+}
+
+bool mmhal_uart_validate_config(const struct mmhal_uart_config *config)
+{
+    /* This is not currently configurable, so the given configuration must match the hard coded
+     * configuration. */
+    return (config->baudrate == 115200 && !config->hw_flow_ctrl_en);
+}
+
+bool mmhal_uart_configure(const struct mmhal_uart_config *config)
+{
+    /* Either already in a supported config or trying to set unsupported config options,
+     * so return the output of mmhal_uart_validate_config. */
+    return (mmhal_uart_validate_config(config));
+}
+
+#else
+
+void mmhal_uart_init(mmhal_uart_rx_cb_t rx_cb, void *rx_cb_arg)
+{
+    MM_UNUSED(rx_cb);
+    MM_UNUSED(rx_cb_arg);
+    mmosal_printf("UART HAL not supported as UART is in use for logs\n");
+    mmosal_printf("Please rebuild with ENABLE_UART_HAL defined to a non-zero value\n");
+    mmosal_printf("and with DISABLE_UART_LOG defined.\n");
+}
+
+void mmhal_uart_deinit(void)
+{
+}
+
+void mmhal_uart_tx(const uint8_t *data, size_t length)
+{
+    MM_UNUSED(data);
+    MM_UNUSED(length);
+}
+
+bool mmhal_uart_set_deep_sleep_mode(enum mmhal_uart_deep_sleep_mode mode)
+{
+    MM_UNUSED(mode);
+    return false;
+}
+
+bool mmhal_uart_validate_config(const struct mmhal_uart_config *config)
+{
+    MM_UNUSED(config);
+    return false;
+}
+
+bool mmhal_uart_configure(const struct mmhal_uart_config *config)
+{
+    MM_UNUSED(config);
+    return false;
+}
+
+#endif
