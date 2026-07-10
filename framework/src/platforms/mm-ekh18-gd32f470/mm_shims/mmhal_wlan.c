@@ -3,15 +3,15 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * mmhal_wlan.c for mm-ekh18-gd32f470: MM8108 host interface (GPIO control lines + polled SPI,
- * plus full GPIO/SPI teardown on disable -- see mmhal_wlan_init()/mmhal_wlan_deinit() below).
+ * mmhal_wlan.c for mm-ekh18-gd32f470: MM8108 host interface (GPIO control lines + polled/DMA SPI,
+ * plus full GPIO/SPI/DMA teardown on disable -- see mmhal_wlan_init()/mmhal_wlan_deinit() below).
  *
- * NOTE: unlike some of the other mm-ekh08-* platforms, this implementation always uses polled
- * (non-DMA) SPI transfers, even for large buffers. This trades away some throughput/CPU headroom
- * in exchange for removing a whole category of risk (getting the DMA controller/stream/channel
- * request-mapping wrong -- see framework/src/bsps/gd32f4xx/README-PROVENANCE.md) while this port
- * is unverified against real hardware. DMA can be added later once the rest of the port is
- * validated.
+ * NOTE: bulk SPI transfers (>= DMA_TRANSFER_MIN_LENGTH bytes) use DMA1 channel 0 (RX) / channel 5
+ * (TX), subperipheral 3 -- see the SPI_DMA_* / SPI_RX_DMA_* macros in bsp/Core/Inc/main.h for
+ * where that request mapping came from and how confident we are in it (cross-checked against
+ * Zephyr's GD32F4xx devicetree, but NOT yet confirmed on this platform's real hardware). Small
+ * transfers below that threshold stay polled, matching mm-ekh18-wb55's DMA_TRANSFER_MIN_LENGTH
+ * approach, since DMA setup overhead isn't worth it for a handful of bytes.
  */
 
 #include "mmhal_wlan.h"
@@ -29,6 +29,15 @@
 #define BYTE_TRAIN 16
 
 MM_STATIC_ASSERT((BYTE_TRAIN >= 10), "BYTE_TRAIN must be at least 10.");
+
+/** Binary semaphore for indicating DMA transaction complete. */
+static struct mmosal_semb *dma_semb_handle;
+
+/** Maximum time we expect a DMA transaction to take (for the maximum block size) in ms. */
+#define DMA_WAIT_TMO (10)
+
+/** Minimum length of data to be transferred we require before we do a DMA transfer. */
+#define DMA_TRANSFER_MIN_LENGTH (16)
 
 /** SPI hw interrupt handler. Must be set before enabling irq */
 static mmhal_irq_handler_t spi_irq_handler = NULL;
@@ -100,13 +109,18 @@ static void wlan_gpio_deinit(void)
 
 /**
  * Disable the SPI0 peripheral and set its pins to a safe output-low state, to prevent current
- * leakage into a powered-down MM8108. This platform always uses polled (non-DMA) SPI transfers
- * (see file header), so unlike the STM32 mm-mm8108-ekh05 reference this was ported from, there is
- * no DMA channel/stream to tear down here.
+ * leakage into a powered-down MM8108. Also tears down the DMA channels used for bulk transfers
+ * (see mmhal_wlan_spi_read_buf()/write_buf() below) -- they get freshly reconfigured on every
+ * individual transfer anyway, but disabling them here avoids leaving a stale transfer armed while
+ * the MM8108 (and therefore SPI0 itself) is powered down.
  */
 static void wlan_hal_spi_deinit(void)
 {
     NVIC_DisableIRQ(SPI_PERIPH_IRQn);
+    NVIC_DisableIRQ(SPI_RX_DMA_IRQn);
+
+    dma_channel_disable(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL);
+    dma_channel_disable(SPI_DMA_PERIPH, SPI_TX_DMA_CHANNEL);
 
     spi_disable(SPI_PERIPH);
     spi_i2s_deinit(SPI_PERIPH);
@@ -171,21 +185,125 @@ uint8_t mmhal_wlan_spi_rw(uint8_t data)
     return (uint8_t)spi_i2s_data_receive(SPI_PERIPH);
 }
 
+/**
+ * Common DMA channel setup shared by the read/write DMA helpers below: disables both channels
+ * (waiting for any in-progress transfer to actually stop -- disabling a GD32F4xx DMA channel takes
+ * effect asynchronously), then configures both a source and a destination side so the transfer
+ * always looks like a real SPI full-duplex exchange to the peripheral, even though one side's
+ * result (or source data) isn't of interest to the caller.
+ *
+ * @param mem_addr    Address of the buffer being read into or written from.
+ * @param len         Number of bytes to transfer.
+ * @param mem_is_rx   true if @p mem_addr is the destination (a read), false if it is the source
+ *                    (a write).
+ * @param dummy_word  Pointer to a caller-owned uint32_t used as the fixed (non-incrementing)
+ *                    dummy source (for reads) or scratch sink (for writes). Must remain valid
+ *                    until the transfer completes (i.e. it must be a local in the caller, not a
+ *                    temporary that goes out of scope before mmosal_semb_wait() returns).
+ */
+static void mmhal_wlan_spi_dma_transfer(void *mem_addr, unsigned len, bool mem_is_rx,
+                                        uint32_t *dummy_word)
+{
+    dma_single_data_parameter_struct dma_init_struct;
+
+    dma_channel_disable(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL);
+    dma_channel_disable(SPI_DMA_PERIPH, SPI_TX_DMA_CHANNEL);
+
+    dma_deinit(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL);
+    dma_deinit(SPI_DMA_PERIPH, SPI_TX_DMA_CHANNEL);
+
+    dma_single_data_para_struct_init(&dma_init_struct);
+    dma_init_struct.periph_addr = (uint32_t)&SPI_DATA(SPI_PERIPH);
+    dma_init_struct.periph_inc = DMA_PERIPH_INCREASE_DISABLE;
+    dma_init_struct.periph_memory_width = DMA_PERIPH_WIDTH_8BIT;
+    dma_init_struct.circular_mode = DMA_CIRCULAR_MODE_DISABLE;
+    dma_init_struct.number = len;
+    dma_init_struct.priority = DMA_PRIORITY_HIGH;
+
+    /* RX channel: MM8108 -> buf (real destination) if this is a read, else MM8108 -> dummy_word
+     * (scratch sink, not incremented) if this is a write.
+     *
+     * NB: .direction must be set explicitly here -- dma_single_data_para_struct_init() defaults
+     * it to DMA_PERIPH_TO_MEMORY, which is coincidentally correct for this (RX) channel but would
+     * silently carry over to the TX channel below if left unset there too (see that comment). */
+    dma_init_struct.direction = DMA_PERIPH_TO_MEMORY;
+    dma_init_struct.memory0_addr = mem_is_rx ? (uint32_t)mem_addr : (uint32_t)dummy_word;
+    dma_init_struct.memory_inc = mem_is_rx ? DMA_MEMORY_INCREASE_ENABLE : DMA_MEMORY_INCREASE_DISABLE;
+    dma_single_data_mode_init(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL, &dma_init_struct);
+    dma_channel_subperipheral_select(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL, SPI_RX_DMA_SUBPERI);
+
+    /* TX channel: buf -> MM8108 (real source) if this is a write, else a fixed 0xFF dummy_word
+     * (not incremented) if this is a read.
+     *
+     * BUG FIXED HERE: this channel's .direction was never being set to DMA_MEMORY_TO_PERIPH --
+     * it was silently inheriting DMA_PERIPH_TO_MEMORY, left over from the RX channel's setup
+     * above (same struct instance reused for both channels). That meant the TX channel was
+     * configured to read *from* SPI0_DATA into memory instead of writing memory *into* SPI0_DATA,
+     * so the outgoing half of every full-duplex DMA transfer never actually happened. Confirmed
+     * on real hardware: the "Bulk write/read into the MM chip" porting_assistant step hit the
+     * mmosal_semb_wait() timeout below and asserted (MMOSAL_ASSERT(ok) at the end of this
+     * function) -- the RX channel's completion IRQ never fired because the transfer never
+     * genuinely completed. */
+    *dummy_word = 0xFFU;
+    dma_init_struct.direction = DMA_MEMORY_TO_PERIPH;
+    dma_init_struct.memory0_addr = mem_is_rx ? (uint32_t)dummy_word : (uint32_t)mem_addr;
+    dma_init_struct.memory_inc = mem_is_rx ? DMA_MEMORY_INCREASE_DISABLE : DMA_MEMORY_INCREASE_ENABLE;
+    dma_single_data_mode_init(SPI_DMA_PERIPH, SPI_TX_DMA_CHANNEL, &dma_init_struct);
+    dma_channel_subperipheral_select(SPI_DMA_PERIPH, SPI_TX_DMA_CHANNEL, SPI_TX_DMA_SUBPERI);
+
+    /* Only the RX channel raises a completion interrupt -- SPI is full-duplex so both channels
+     * finish together (same clock, same byte count), and waiting on one is sufficient.
+     *
+     * NB: DMA_INT_FTF (the CHXCTL_FTFIE control-register enable bit) is the correct constant
+     * here -- NOT DMA_INT_FLAG_FTF (== DMA_INTF_FTFIF, a *different* bit in the separate INTF
+     * status register, BIT(5) vs CHXCTL_FTFIE's BIT(4)). Same enum-mixup species as the
+     * USART_INT_RBNE/USART_INT_FLAG_RBNE bug fixed elsewhere in this platform (see
+     * README-PROVENANCE.md) -- caught here in review before it ever reached hardware. */
+    dma_interrupt_enable(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL, DMA_INT_FTF);
+
+    dma_channel_enable(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL);
+    dma_channel_enable(SPI_DMA_PERIPH, SPI_TX_DMA_CHANNEL);
+
+    spi_dma_enable(SPI_PERIPH, SPI_DMA_RECEIVE);
+    spi_dma_enable(SPI_PERIPH, SPI_DMA_TRANSMIT);
+
+    bool ok = mmosal_semb_wait(dma_semb_handle, DMA_WAIT_TMO);
+    MMOSAL_ASSERT(ok);
+}
+
 void mmhal_wlan_spi_read_buf(uint8_t *buf, unsigned len)
 {
-    unsigned ii;
-    for (ii = 0; ii < len; ii++)
+    if (len < DMA_TRANSFER_MIN_LENGTH)
     {
-        *buf++ = mmhal_wlan_spi_rw(0xFF);
+        unsigned ii;
+        for (ii = 0; ii < len; ii++)
+        {
+            *buf++ = mmhal_wlan_spi_rw(0xFF);
+        }
+    }
+    else
+    {
+        uint32_t dummy_word;
+        mmhal_wlan_spi_dma_transfer(buf, len, true, &dummy_word);
     }
 }
 
 void mmhal_wlan_spi_write_buf(const uint8_t *buf, unsigned len)
 {
-    unsigned ii;
-    for (ii = 0; ii < len; ii++)
+    if (len < DMA_TRANSFER_MIN_LENGTH)
     {
-        (void)mmhal_wlan_spi_rw(*buf++);
+        unsigned ii;
+        for (ii = 0; ii < len; ii++)
+        {
+            (void)mmhal_wlan_spi_rw(*buf++);
+        }
+    }
+    else
+    {
+        uint32_t dummy_word;
+        /* discard-const: the TX-channel-only memory pointer is never written by the DMA engine
+         * when mem_is_rx is false, only read from -- see mmhal_wlan_spi_dma_transfer(). */
+        mmhal_wlan_spi_dma_transfer((void *)(uintptr_t)buf, len, false, &dummy_word);
     }
 }
 
@@ -255,6 +373,7 @@ void mmhal_wlan_init(void)
 {
     /* Re-initialise connections to the MM8108 before enabling the chip -- undoes the teardown
      * performed by mmhal_wlan_deinit(). */
+    dma_semb_handle = mmosal_semb_create("mmhal_wlan_dma_semb");
     wlan_hal_gpio_init();
     SPI_PERIPH_INIT();
 
@@ -269,6 +388,7 @@ void mmhal_wlan_deinit(void)
      * powered-down chip. */
     wlan_hal_spi_deinit();
     wlan_gpio_deinit();
+    mmosal_semb_delete(dma_semb_handle);
 }
 
 void mmhal_wlan_wake_assert(void)
@@ -330,6 +450,19 @@ void SPI_IRQ_HANDLER(void)
         {
             spi_irq_handler();
         }
+    }
+}
+
+/**
+ * @brief This function handles the SPI0 RX DMA channel's transfer-complete interrupt, signalling
+ * mmhal_wlan_spi_dma_transfer() (see above) that a bulk SPI read/write has finished.
+ */
+void SPI_RX_DMA_IRQ_HANDLER(void)
+{
+    if (dma_interrupt_flag_get(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL, DMA_INT_FLAG_FTF))
+    {
+        dma_interrupt_flag_clear(SPI_DMA_PERIPH, SPI_RX_DMA_CHANNEL, DMA_INT_FLAG_FTF);
+        mmosal_semb_give_from_isr(dma_semb_handle);
     }
 }
 

@@ -10,7 +10,7 @@
 #include "mmhal_core.h"
 
 /** Example hardware version string used for @c mmhal_get_hardware_version() */
-#define MMHAL_HARDWARE_VERSION "MM-EKH08-GD32F470"
+#define MMHAL_HARDWARE_VERSION "MM-EKH18-GD32F470"
 
 /**
  * Deep sleep veto IDs used by mmhal. These must be in the range between

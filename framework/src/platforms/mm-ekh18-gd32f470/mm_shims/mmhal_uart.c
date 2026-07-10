@@ -240,7 +240,7 @@ void LOG_USART_RX_IRQ_HANDLER(void)
 
 void UART_IRQ_HANDLER(void)
 {
-    while (usart_interrupt_flag_get(UART_INTERFACE, USART_INT_RBNE))
+    while (usart_interrupt_flag_get(UART_INTERFACE, USART_INT_FLAG_RBNE))
     {
         uart_rx_ringbuf_put((uint8_t)usart_data_receive(UART_INTERFACE));
         if (mmhal_uart.rx_thread.handle != NULL)
