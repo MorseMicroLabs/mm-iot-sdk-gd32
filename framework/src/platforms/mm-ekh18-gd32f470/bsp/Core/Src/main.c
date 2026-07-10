@@ -151,7 +151,8 @@ static void MX_GPIO_Init(void)
 }
 
 /**
- * @brief SPI0 Initialization Function: MM8108 host interface (polled, no DMA).
+ * @brief SPI0 Initialization Function: MM8108 host interface (polled for small transfers, DMA for
+ * bulk transfers -- see mm_shims/mmhal_wlan.c).
  *
  * Not static: also called from mm_shims/mmhal_wlan.c (via SPI_PERIPH_INIT(), see main.h) to
  * re-initialise SPI0 in mmhal_wlan_init(), after mmhal_wlan_deinit() has torn it down.
@@ -161,6 +162,14 @@ void MX_SPI0_Init(void)
     spi_parameter_struct spi_init_struct;
 
     rcu_periph_clock_enable(RCU_SPI0);
+
+    /* DMA1 clock and the RX-channel transfer-complete IRQ only need enabling once (they aren't
+     * touched by wlan_hal_spi_deinit()'s teardown -- see mm_shims/mmhal_wlan.c), but doing it here
+     * unconditionally on every (re-)init is harmless and keeps this function self-contained. Only
+     * the RX channel's completion IRQ is used: SPI is full-duplex, so RX and TX finish together,
+     * and waiting on one is sufficient (matching the mm-ekh18-wb55 reference). */
+    rcu_periph_clock_enable(RCU_DMA1);
+    nvic_irq_enable(SPI_RX_DMA_IRQn, 15U, 0U);
 
     gpio_mode_set(SPI_SCK_GPIO_Port, GPIO_MODE_AF, GPIO_PUPD_NONE,
                  SPI_SCK_Pin | SPI_MISO_Pin | SPI_MOSI_Pin);
@@ -175,9 +184,13 @@ void MX_SPI0_Init(void)
     spi_init_struct.nss = SPI_NSS_SOFT;
     spi_init_struct.endian = SPI_ENDIAN_MSB;
     spi_init_struct.clock_polarity_phase = SPI_CK_PL_LOW_PH_1EDGE;
-    /* APB2 / 8 = 12.5MHz SPI clock at the 100MHz APB2 configured above. Adjust to suit the
-     * MM8108's supported SPI clock rate and your board's signal integrity. */
-    spi_init_struct.prescale = SPI_PSC_8;
+    /* APB2 / 2 = 50MHz SPI clock at the 100MHz APB2 configured above. Requested rate was 40MHz,
+     * but the GD32F470 SPI prescaler only divides by powers of 2 (2/4/8/...) off a fixed 100MHz
+     * APB2, so 40MHz isn't reachable without reworking the whole clock tree (APB2 would need to
+     * be 80MHz, which cascades into AHB/APB1 and therefore USART baud rate calculation and flash
+     * wait states); 50MHz is the closest achievable rate above 40MHz. Adjust to suit your board's
+     * signal integrity if you see SPI errors at this rate. */
+    spi_init_struct.prescale = SPI_PSC_2;
     spi_init(SPI_PERIPH, &spi_init_struct);
     spi_nss_output_disable(SPI_PERIPH);
 

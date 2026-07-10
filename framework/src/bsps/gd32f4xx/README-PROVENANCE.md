@@ -166,13 +166,130 @@ read path on real hardware to actually exercise it. Fixed by changing the lookup
 `[sector.start, sector.start + sector.size)` range-containment check over the full bank-0 sector
 map (tracking each sector's size alongside its start address, rather than assuming a fixed 16K).
 
+## USART_INT_RBNE vs USART_INT_FLAG_RBNE: wrong enum passed to usart_interrupt_flag_get()
+
+Building the `cli` example (the first one to actually exercise UART RX, since `porting_assistant`
+and `scan` don't take console input) failed with `-Werror=enum-conversion` in
+`mm_shims/mmhal_uart.c`'s `UART_IRQ_HANDLER()`:
+
+```c
+while (usart_interrupt_flag_get(UART_INTERFACE, USART_INT_RBNE))
+```
+
+`gd32f4xx_usart.h` defines two *separate* enums for RBNE that look like they should be
+interchangeable but aren't: `USART_INT_RBNE` (type `usart_interrupt_enum`, the correct constant for
+`usart_interrupt_enable()`/`usart_interrupt_disable()` -- used correctly elsewhere in this same
+file) and `USART_INT_FLAG_RBNE` (type `usart_interrupt_flag_enum`, the correct constant for
+`usart_interrupt_flag_get()`/`_clear()`). `usart_interrupt_flag_get()` was called with the
+*enable*-flavoured constant instead of the *flag*-flavoured one. This is the same species of bug
+as the RCU_CKSYSSRC_PLLP/RCU_SCSS_PLLP mixup above -- a vendor library exposing two
+same-conceptual-purpose constants that are not actually interchangeable -- just caught at compile
+time (`-Werror=enum-conversion`) rather than only showing up on real hardware, since GCC's
+C++-compat warnings treat the two anonymous enums as genuinely distinct types. Fixed by using
+`USART_INT_FLAG_RBNE`. Also fixed the identical bug in the stale, unbuilt
+`mm-ekh08-gd32f470/mm_shims/mmhal_uart.c` copy for consistency, though it isn't part of any actual
+build (see `framework/mk/platform-mm-ekh08-gd32f470.mk`, which forwards entirely to this platform).
+
+## Brown-out reset during active scanning (not a code bug)
+
+Running the `scan` example, the board reliably crashed and rebooted partway through printing scan
+results -- output cut off mid-print (no trailing garbage, no partial line) and the serial link
+dropped, then the boot banner reappeared. This looked initially like it could be the same
+assert-and-reset path as the BCF bug above (`mmosal_impl_assert()` disables interrupts before it
+finishes draining the log ring buffer, which would produce exactly this kind of clean mid-print
+cutoff), but no `Failure N logged at pc...` line appeared on the next boot, which that path always
+prints unconditionally via `mmosal_dump_failure_info()` in `init_task_main()`. That ruled out
+`MMOSAL_ASSERT`. It also ruled out a raw CPU fault (`HardFault`/`BusFault`/`UsageFault`/`MemManage`
+all weakly alias to `Default_Handler` in the vendored `startup_gd32f450_470.S`, which is a bare
+`b Infinite_Loop` -- it hangs, it does not reset), and ruled out a watchdog (none is configured
+anywhere in this codebase; `fwdgt`/`wwdgt` peripheral drivers are vendored but never enabled).
+
+Confirmed via `RCU_RSTSCK` (`0x40023874`, bit 25 = `RCU_FLAG_BORRST`) read over GDB immediately
+after a crash (without an intervening reset, so the flag wasn't overwritten): it was a brown-out
+reset. `scan` draws noticeably more current than `porting_assistant` ever does (active TX/RX
+across channels during a scan, vs mostly-idle host-side tests), and the power supply feeding the
+board/MMECH18 combination sags enough under that load to trip the GD32F470's BOR threshold. This is
+a power-delivery issue (USB port/cable current limit, missing decoupling on a hand-wired MMECH18
+connection, etc.), not a firmware bug -- documented here so it isn't mistaken for one on the next
+platform that exercises real RF load for the first time. If you hit this, try a higher-current USB
+port/hub or a dedicated 5V supply before investigating code.
+
+## DMA-based SPI transfers added (request mapping confirmed against the User Manual)
+
+SPI transfers were initially polled-only (byte-at-a-time, waiting on `SPI_FLAG_TBE`/`SPI_FLAG_RBNE`
+in `mmhal_wlan_spi_rw()`), by design -- the original platform header comment explicitly deferred
+DMA to "once the rest of the port is validated". Once real-hardware bring-up (BCF load, scan,
+ping, full STA connect) was confirmed working at 50MHz SPI, DMA was added for transfers
+`>= DMA_TRANSFER_MIN_LENGTH` (16) bytes; smaller transfers remain polled (not worth the DMA
+setup/teardown overhead). See `mm_shims/mmhal_wlan.c` (`mmhal_wlan_spi_dma_transfer()`,
+`mmhal_wlan_spi_read_buf()`/`_write_buf()`) and `bsp/Core/Inc/main.h`.
+
+The SPI0-to-DMA1-channel/subperipheral request mapping is **not encoded anywhere in this repo's
+vendored driver headers** -- unlike the STM32 DMA controllers (where STM32CubeMX/HAL headers
+document the stream+channel table directly), GD32F4xx's DMA request mapping is a fixed,
+chip-specific hardware wiring documented only in GigaDevice's User Manual. It was first
+cross-checked against Zephyr Project's official, in-tree devicetree binding for GD32's DMA
+controller (`gd,gd32-dma-v1`), whose real SPI0 devicetree example reads
+`dmas = <&dma1 0 3 0 0>, <&dma1 5 3 ...>; dma-names = "rx", "tx";` -- i.e. SPI0 RX = DMA1 channel 0
+/ subperipheral 3, SPI0 TX = DMA1 channel 5 / subperipheral 3 -- then **confirmed directly against
+GigaDevice's GD32F4xx User Manual Rev 3.4 (Jan. 2026)**, Table 10-3 "Peripheral requests to DMA1",
+PERIEN[2:0] = 0b011 row: channel 0 = SPI0_RX, channel 5 = SPI0_TX (channel 2 is listed as an
+alternate for SPI0_RX at the same subperipheral -- not used here; the manual explicitly warns
+against enabling both alternates for the same peripheral request simultaneously, as it causes a
+transmission error). Used verbatim as `SPI_RX_DMA_CHANNEL` etc. in `main.h`. This mapping is now
+manual-confirmed, but has **not yet been exercised on this platform's real hardware** at the time
+of writing.
+
+While implementing this, a second instance of the same enum-mixup bug class documented above
+(`USART_INT_RBNE` vs `USART_INT_FLAG_RBNE`) was caught in review before it reached hardware:
+`DMA_INT_FLAG_FTF` (`== DMA_INTF_FTFIF`, `BIT(5)` in the INTF *status* register) was initially
+passed to `dma_interrupt_enable()`, which expects the separate *control-register enable bit*
+`DMA_INT_FTF` (`== DMA_CHXCTL_FTFIE`, `BIT(4)`) -- two same-looking vendor constants for
+conceptually "the same" flag that are not interchangeable, exactly like the USART pair. Fixed in
+`mmhal_wlan_spi_dma_transfer()`; `dma_interrupt_flag_get()`/`_clear()` correctly use
+`DMA_INT_FLAG_FTF` (they read/clear the status register, not the control register).
+
+`Drivers/GD32F4xx_standard_peripheral/Source/gd32f4xx_dma.c` (vendored but previously unused, since
+this platform was polled-SPI-only) was added to `framework/mk/platform-mm-ekh18-gd32f470.mk`'s
+`BSP_DRIVERS_SRCS_C` -- the DMA code will fail to link without it.
+
+## DMA TX channel missing .direction (real-hardware bug, found via porting_assistant)
+
+First real-hardware test of the DMA path (`porting_assistant`'s "Bulk write/read into the MM chip"
+step, which uses 1496-byte transfers -- well above `DMA_TRANSFER_MIN_LENGTH`, so it's the first
+step that actually exercises DMA rather than the polled path) hit an `MMOSAL_ASSERT` in
+`mmhal_wlan_spi_dma_transfer()` (`Failure N logged at pc ..., line 255 in <mmhal_wlan.c's
+fileid>`) -- the 10ms completion-semaphore wait timed out every time.
+
+Root cause: `mmhal_wlan_spi_dma_transfer()` reuses one `dma_single_data_parameter_struct` for both
+the RX and TX channel `dma_single_data_mode_init()` calls, but never set `.direction` on either.
+`dma_single_data_para_struct_init()` defaults `.direction` to `DMA_PERIPH_TO_MEMORY`, which is
+coincidentally correct for the RX channel but silently carried over, unchanged, to the TX channel
+-- so the TX channel was configured to *read from* `SPI0_DATA` into memory instead of *writing*
+memory into `SPI0_DATA`. The outgoing half of every full-duplex DMA transfer never happened, the
+RX channel's transfer-complete IRQ never fired (the transfer never genuinely completed), and the
+wait timed out. Note this bug could not have been caught by the two SDIO/SPI bring-up steps that
+ran before it (`SDIO/SPI Startup`, `Read chip id`) -- both only ever move a handful of bytes at a
+time (a 6-byte SDIO command buffer, single-byte status reads), all under
+`DMA_TRANSFER_MIN_LENGTH`, so they never touch the DMA path at all; only a genuinely bulk transfer
+exercises it. Fixed by explicitly setting `.direction` for each channel
+(`DMA_PERIPH_TO_MEMORY`/`DMA_MEMORY_TO_PERIPH`) instead of relying on the struct-init default.
+
+(Before finding this, a suspected wiring regression was ruled out first: the board's MMECH18
+connection is hand-wired jumpers on a bare GPIO header, not a mating connector, and it had been
+moved around, so a loose `RESET_N`/`WAKE`/SPI jumper was the first, cheaper hypothesis. A reset
+alone fixed the earlier `SDIO/SPI Startup` failure, confirming the wiring was fine and this DMA
+bug was the real, separate issue underneath.)
+
 ## What is still not verified
 
 1. **MCU deep sleep** is not implemented (`mmhal_sleep_prepare()` only ever returns
    `MMHAL_SLEEP_SHALLOW`/`MMHAL_SLEEP_DISABLED`) -- see `mm_shims/mmhal_os.c`.
-2. **DMA-based SPI transfers** are not implemented; all SPI transfers are polled -- see
-   `mm_shims/mmhal_wlan.c`. (The GPIO/SPI teardown added in `mmhal_wlan_deinit()` only resets the
-   SPI peripheral, pins, and clock accordingly -- there are no DMA channels to tear down.)
+2. **DMA-based SPI transfers**: the SPI0 DMA1 channel/subperipheral request mapping is confirmed
+   against GigaDevice's own GD32F4xx User Manual Rev 3.4, Table 10-3, and the TX-channel
+   `.direction` bug (see above) is fixed and passed `porting_assistant`'s bulk write/read test on
+   real hardware. Still worth keeping an eye on for any further DMA configuration issues
+   (FIFO/burst settings, priority) under different transfer sizes.
 3. **WLAN bring-up beyond BCF validation** (full connect/data-path testing) is still unconfirmed on
    physical silicon -- SPI/GPIO wiring, clock stability, and BUSY IRQ handling have now been
    verified end-to-end via `porting_assistant` on real hardware, up to and including BCF loading.

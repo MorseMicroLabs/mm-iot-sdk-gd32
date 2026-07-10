@@ -26,9 +26,12 @@
 # framework/src/platforms/mm-ekh18-wb55/readme.md's pinout table, which is identical to
 # mm-ekh08-wb55's), so no pin/wiring changes were needed -- only the chip-selection variables below.
 #
-# IMPORTANT: MCU deep sleep / DMA-based SPI transfers are not implemented (see mm_shims/mmhal_os.c
-# and mm_shims/mmhal_wlan.c). mmhal_wlan_deinit() does, however, fully tear down the SPI peripheral
-# and MM8108 control GPIOs on disable (matching mm-mm8108-ekh05) to prevent current leakage.
+# IMPORTANT: MCU deep sleep is not implemented (see mm_shims/mmhal_os.c). DMA-based SPI transfers
+# ARE implemented (see mm_shims/mmhal_wlan.c and bsp/Core/Inc/main.h for the SPI0 DMA1
+# channel/subperipheral mapping and its provenance) for transfers >= DMA_TRANSFER_MIN_LENGTH bytes;
+# smaller transfers stay polled. mmhal_wlan_deinit() fully tears down the SPI peripheral, its DMA
+# channels, and MM8108 control GPIOs on disable (matching mm-mm8108-ekh05) to prevent current
+# leakage.
 
 CORE = arm-cortex-m4f
 PLATFORM_PATH = src/platforms/mm-ekh18-gd32f470
@@ -64,6 +67,7 @@ BSP_DRIVERS_SRCS_C += Drivers/GD32F4xx_standard_peripheral/Source/gd32f4xx_syscf
 BSP_DRIVERS_SRCS_C += Drivers/GD32F4xx_standard_peripheral/Source/gd32f4xx_fmc.c
 BSP_DRIVERS_SRCS_C += Drivers/GD32F4xx_standard_peripheral/Source/gd32f4xx_misc.c
 BSP_DRIVERS_SRCS_C += Drivers/GD32F4xx_standard_peripheral/Source/gd32f4xx_trng.c
+BSP_DRIVERS_SRCS_C += Drivers/GD32F4xx_standard_peripheral/Source/gd32f4xx_dma.c
 
 BSP_DRIVERS_SRCS_H += Drivers/CMSIS/GD/GD32F4xx/Include/gd32f4xx.h
 BSP_DRIVERS_SRCS_H += Drivers/CMSIS/GD/GD32F4xx/Include/system_gd32f4xx.h
@@ -80,6 +84,7 @@ BSP_DRIVERS_SRCS_H += Drivers/GD32F4xx_standard_peripheral/Include/gd32f4xx_sysc
 BSP_DRIVERS_SRCS_H += Drivers/GD32F4xx_standard_peripheral/Include/gd32f4xx_fmc.h
 BSP_DRIVERS_SRCS_H += Drivers/GD32F4xx_standard_peripheral/Include/gd32f4xx_misc.h
 BSP_DRIVERS_SRCS_H += Drivers/GD32F4xx_standard_peripheral/Include/gd32f4xx_trng.h
+BSP_DRIVERS_SRCS_H += Drivers/GD32F4xx_standard_peripheral/Include/gd32f4xx_dma.h
 
 MM_SHIM_DIR     = $(PLATFORM_PATH)/mm_shims
 MM_SHIM_SRCS_C += $(patsubst $(MMIOT_ROOT)/$(MM_SHIM_DIR)/%,%,$(wildcard $(MMIOT_ROOT)/$(MM_SHIM_DIR)/*.c))

@@ -41,6 +41,24 @@ void MX_SPI0_Init(void);
 #define SPI_PERIPH_IRQn      (SPI0_IRQn)
 #define SPI_PERIPH_INIT       MX_SPI0_Init
 
+/* SPI0 DMA request mapping: NOT guessable from the STM32F4-compatible register layout alone (the
+ * DMA controller/channel/subperipheral assignment is a separate, chip-specific table that isn't
+ * encoded anywhere in the peripheral driver headers). Originally cross-checked against Zephyr's
+ * GD32F4xx SPI/DMA devicetree binding (gd,gd32-dma-v1), then CONFIRMED directly against
+ * GigaDevice's own GD32F4xx User Manual Rev 3.4 (Jan. 2026), Table 10-3 "Peripheral requests to
+ * DMA1", PERIEN[2:0] = 0b011 row: channel 0 = SPI0_RX, channel 5 = SPI0_TX (channel 2 is also
+ * listed as an alternate for SPI0_RX at the same subperipheral -- not used here; the manual
+ * warns against enabling both alternates for the same peripheral simultaneously). Still not yet
+ * exercised on this platform's real hardware (see mm_shims/mmhal_wlan.c), but the mapping itself
+ * is now manual-confirmed, not just cross-checked. */
+#define SPI_DMA_PERIPH       (DMA1)
+#define SPI_RX_DMA_CHANNEL   (DMA_CH0)
+#define SPI_TX_DMA_CHANNEL   (DMA_CH5)
+#define SPI_RX_DMA_SUBPERI   (DMA_SUBPERI3)
+#define SPI_TX_DMA_SUBPERI   (DMA_SUBPERI3)
+#define SPI_RX_DMA_IRQn         (DMA1_Channel0_IRQn)
+#define SPI_RX_DMA_IRQ_HANDLER  DMA1_Channel0_IRQHandler
+
 /* SPI_IRQ (PB1) and BUSY (PB0) each get their own dedicated single-line EXTI vector rather than
  * sharing the EXTI9_5/EXTI10_15 group vectors used on some other mm-ekh08-* platforms. */
 #define SPI_IRQn            (EXTI1_IRQn)
