@@ -389,7 +389,7 @@ def do_read(isp, args):
 
 
 def do_console(isp, args):
-    total = isp.console(duration=args.duration)
+    total = isp.console(duration=args.duration, idle=args.idle)
     logging.info("%d bytes of console output", total)
     return 0
 
@@ -430,7 +430,13 @@ def main():
     p_read.set_defaults(func=do_read)
 
     p_console = sub.add_parser("console", help="Boot from flash and stream the console")
-    p_console.add_argument("-d", "--duration", type=float, default=60.0)
+    p_console.add_argument("-d", "--duration", type=float, default=60.0,
+                           help="Maximum seconds to stream for (default 60)")
+    p_console.add_argument("-i", "--idle", type=float, default=10.0,
+                           help="Stop early after this many seconds with no output, once "
+                                "something has been received (default 10). Raise it for tests "
+                                "that go quiet for a long time, e.g. a 100s iperf transfer that "
+                                "only reports at the end.")
     p_console.set_defaults(func=do_console)
 
     args = parser.parse_args()
