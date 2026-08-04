@@ -36,7 +36,7 @@
         /* The Wi-Fi security to use, valid values are sae, owe and open */
         "wlan.security": "sae"
         /* The 2 letter country code to ensure the correct regulatory domain is used */
-        // "wlan.country_code": "XX"
+        "wlan.country_code": "AU"
 
         /* If true use DHCP, else the static IP configuration will be used */
         "ip.dhcp_enabled": "true"
@@ -135,7 +135,7 @@
          * immediately. */
         // "wlan.duty_cycle_mode": "spread"
 
-        "ping.target": "192.168.1.1"
+        "ping.target": "192.168.12.1"
         "ping.count": "10"
         "ping.interval": "1000"
         "ping.size": "56"

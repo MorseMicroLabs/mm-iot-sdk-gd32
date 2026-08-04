@@ -1,0 +1,21 @@
+# Build output.
+# Deliberately scoped to build directories rather than using global patterns like
+# *.o / *.map -- the SDK tracks 114 Doxygen-generated .map files under framework/doc/html,
+# which a global rule would shadow.
+build/
+build_debug/
+build_symbols/
+
+# Python
+__pycache__/
+*.pyc
+
+# Vendor / dev-board resource packs. These are multi-gigabyte downloads (the
+# GD32F527ZMT7 pack alone is ~2.1GB) and are reference material, not SDK source.
+/GD32F470VGT6/
+/GD32F527ZMT7/
+/GD32_ISP_CLI/
+/GD32F4xx_Firmware_Library_V3.3.3/
+
+# Scratch
+debug_threads_output.txt
