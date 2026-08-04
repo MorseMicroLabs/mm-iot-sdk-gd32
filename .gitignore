@@ -9,6 +9,7 @@ build_symbols/
 # Python
 __pycache__/
 *.pyc
+framework/.pipenv-synced
 
 # Vendor / dev-board resource packs. These are multi-gigabyte downloads (the
 # GD32F527ZMT7 pack alone is ~2.1GB) and are reference material, not SDK source.
