@@ -68,10 +68,23 @@ with every peripheral already initialised.
 
 **Fix.** `ECC_PrimeNoinit()` in `bsp/Core/Src/main.c`, called as the very first statement of
 `main()`, zero-fills `.noinit` (delimited by the `_snoinit`/`_enoinit` symbols added to
-`bsp/GD32F527ZM_FLASH.ld`). It does this **only on a power-on or brown-out reset**, so `.noinit`
-still does its actual job of carrying crash records across warm resets, and it clears the sticky
-reset flags afterwards (`RCU_RSTSCK_RSTFC`) -- otherwise every later warm reset would still look
-like a cold boot and discard the records.
+`bsp/GD32F527ZM_FLASH.ld`). It primes on **every reset cause except a software reset**, and clears
+the sticky reset flags each boot (`RCU_RSTSCK_RSTFC`) so a later reset does not see a previous
+boot's cause.
+
+A software reset is exactly the assert path -- `mmosal_log_failure_info()` writes the record into
+`.noinit` and then `mmhal_reset()` calls `NVIC_SystemReset()` -- so on that path `.noinit` was
+definitely written during the run that just ended and its ECC is valid. That is the only case
+where the records need to survive, and the only case where reading them is safe.
+
+**Do not gate this on power-on/brown-out instead.** That was the first version of the fix and it
+failed on hardware. `.noinit` moves when the image is relinked (`0x200187A8` in
+`porting_assistant`, `0x20023A48` in `ping`), so reflashing a *different* image relocates `.noinit`
+onto never-written SRAM while `PORRSTF` stays clear from the previous boot -- priming is skipped
+and the board hangs on the very fault this function exists to prevent. It only reproduces after a
+reflash with no power cycle, which is easy to miss: a USB replug between flashes hides it.
+Diagnosed by reading `.noinit` out of SRAM over the ISP bootloader after a hang (SRAM survives a
+warm reset), where `magic` held random garbage rather than `0` or `ASSERT_INFO_MAGIC`.
 
 `.bss`, the FreeRTOS heap (a static array in `.bss`) and the stack all get written before they are
 read, so they establish valid ECC on their own and need no priming. This was verified on hardware:

@@ -68,10 +68,22 @@ int main(void)
  * The mm-ekh18-gd32f470 sibling uses an equivalent linker script and startup and is unaffected,
  * because GD32F4xx SRAM has no ECC. This hazard is GD32F5xx-only.
  *
- * Prime on power-on/brown-out reset only, so .noinit can still do its job of carrying crash records
- * across warm resets (NRST, watchdog, NVIC_SystemReset). The reset-source flags are sticky, so they
- * are cleared afterwards -- otherwise every later warm reset would still look like a cold boot and
- * discard the records.
+ * Preserve .noinit ONLY across a software reset; prime on every other reset cause. A software
+ * reset is precisely the assert path -- mmosal_log_failure_info() records the failure into .noinit
+ * and then mmhal_reset() calls NVIC_SystemReset() -- so on that path .noinit was definitely written
+ * during the run that just ended and its ECC is therefore valid.
+ *
+ * Gating on power-on/brown-out instead is NOT sufficient. That was the first version of this
+ * function and it failed on hardware: .noinit moves when the image is relinked (0x200187A8 in
+ * porting_assistant, 0x20023A48 in ping), so reflashing a different image relocates .noinit onto
+ * never-written SRAM while PORRSTF stays clear from the previous boot. Priming was skipped, the
+ * first read of preserved_failure_info.magic raised the ECC NMI, and the board hung silently --
+ * reproducing the exact fault this function exists to prevent, but only after reflashing without
+ * a power cycle. Confirmed by reading .noinit out of SRAM over the ISP bootloader after a hang:
+ * magic held random garbage (0xC4177932) rather than 0 or ASSERT_INFO_MAGIC.
+ *
+ * The reset-source flags are sticky, so they are cleared each boot -- otherwise a later reset
+ * would still see a previous boot's cause.
  *
  * .bss, the FreeRTOS heap (a static array in .bss) and the stack all get written before they are
  * read, so they establish valid ECC by themselves and need no priming. This was verified on
@@ -84,7 +96,12 @@ static void ECC_PrimeNoinit(void)
     extern uint32_t _snoinit;
     extern uint32_t _enoinit;
 
-    if ((RCU_RSTSCK & (RCU_RSTSCK_PORRSTF | RCU_RSTSCK_BORRSTF)) != 0U)
+    /* Read the reset cause before clearing it. */
+    bool preserve = ((RCU_RSTSCK & RCU_RSTSCK_SWRSTF) != 0U);
+
+    RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
+
+    if (!preserve)
     {
         uint32_t *addr;
         for (addr = &_snoinit; addr < &_enoinit; addr++)
@@ -92,8 +109,6 @@ static void ECC_PrimeNoinit(void)
             *addr = 0U;
         }
     }
-
-    RCU_RSTSCK |= RCU_RSTSCK_RSTFC;
 }
 
 /**
