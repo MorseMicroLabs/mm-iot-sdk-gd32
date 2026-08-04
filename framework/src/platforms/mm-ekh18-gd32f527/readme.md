@@ -152,19 +152,37 @@ GD32F470 readme for the full history of that bug.
 
 ## Flash and RAM
 
-GD32F527ZMT7 has 4096KB of flash in two banks (bank0 0x08000000-0x081FFFFF, bank1
-0x08200000-0x083FFFFF; 40 erase pages total: four 16K + one 64K + fifteen 128K per bank).
-`bsp/GD32F527ZM_FLASH.ld` only partitions the first 1MB between bootloader/mmconfig/application;
-the remaining ~3MB is currently unused and available.
+GD32F527ZMT7 has 4096KB of flash in two 2048KB banks (bank0 0x08000000-0x081FFFFF, bank1
+0x08200000-0x083FFFFF; 40 erase pages total: four 16K + one 64K + fifteen 128K per bank). The
+4096KB figure is confirmed on silicon, not just from the datasheet: reading over the ROM bootloader
+succeeds up to 0x083FFFF0 and is refused from 0x08400000 onwards, matching GigaDevice's own
+`GD32MCUFlashXML/GD32F527.xml` (`GD32F527XMXX`: 4096KB, 40 pages). Note some GD32F527 variants do
+have 4608KB or more (the option-bytes XML lists architecture types for 4096/4608/5632/7680KB), but
+this part is not one of them, and there is nothing mapped contiguously above 0x08400000.
+
+**The application is confined to bank 0 on purpose**, so that bank 1 stays free for a future A/B
+OTA scheme -- a new image can be written into bank 1 while running from bank 0 and then activated
+by flipping the `BB` (boot bank select) option bit, rather than overwriting the running image:
+
+Region     | Pages | Size   | Address range
+-----------|-------|--------|--------------------------
+BOOTLOADER | 0     | 16K    | 0x08000000-0x08003FFF
+CONFIG     | 1-2   | 32K    | 0x08004000-0x0800BFFF
+FLASH      | 3-19  | 2000K  | 0x0800C000-0x081FFFFF
+(reserved) | 20-39 | 2048K  | 0x08200000-0x083FFFFF (bank 1, OTA)
+
+Don't let the application spill into bank 1 without revisiting that plan. Earlier revisions mapped
+only 976KB, which was an unexamined copy of the GD32F470 layout -- that part genuinely has just
+1MB. `ap_mode`, the largest example, had reached 89.8% of the old region; it sits at 43.8% of the
+2000KB one.
 
 `.vectors` is placed at 0x08000000, the true hardware boot address -- see the GD32F470 readme for
 why this matters (linking it elsewhere means a reset silently keeps booting whatever was already
 at the boot address, and verify-after-program will still report success).
 
 The linker script maps 256KB of RAM at 0x20000000 plus a separate 64KB TCM region at 0x10000000
-(unused by this port). Note the comment at the top of that file also mentions "1MB SRAM", which is
-inconsistent with the 256KB `MEMORY` entry beneath it -- confirm against the GD32F527xx datasheet
-before relying on more than 256KB.
+(unused by this port). Only that 256KB has been used and tested; confirm against the GD32F527xx
+datasheet before relying on more.
 
 ## SPI clock
 

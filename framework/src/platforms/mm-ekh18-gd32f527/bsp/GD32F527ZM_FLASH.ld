@@ -1,15 +1,31 @@
 /*
- * Linker script for GD32F527ZMT7 (4MB flash / 1MB SRAM + 64KB TCMRAM).
+ * Linker script for GD32F527ZMT7 (4MB flash; 256KB SRAM mapped here + 64KB TCMRAM).
  *
- * GD32F527ZMT7: 4096KB total flash in bank 0 (sectors 0-3=16K, sector 4=64K, sectors 5-11=128K
- * then sectors 12+ for the extra capacity). For the mmconfig partition we only use the first
- * 1MB (sectors 0-11), identical layout to GD32F470:
+ * NOTE: an earlier version of this header claimed "1MB SRAM", which contradicted the 256K RAM
+ * entry in the MEMORY block below. Only the 256KB actually mapped here has been used and tested;
+ * confirm against the GD32F527xx datasheet before relying on more.
  *
- *   BOOTLOADER: sector 0     (16K),  0x08000000-0x08003FFF
- *   CONFIG:     sectors 1-2  (32K),  0x08004000-0x0800BFFF
- *   FLASH:      sectors 3-11 (976K), 0x0800C000-0x080FFFFF
+ * GD32F527ZMT7 has 4096KB of flash in two 2048KB banks. Confirmed on silicon by reading over the
+ * ROM bootloader: reads succeed up to 0x083FFFF0 and are refused from 0x08400000 onwards. This
+ * matches GigaDevice's own GD32MCUFlashXML/GD32F527.xml (GD32F527XMXX: 4096KB, 40 pages).
  *
- * (The remaining ~3MB of flash at 0x08100000+ is available for future use but unused here.)
+ *   Bank 0: 0x08000000-0x081FFFFF   pages 0-3 = 16K, page 4 = 64K, pages 5-19 = 128K
+ *   Bank 1: 0x08200000-0x083FFFFF   pages 20-23 = 16K, page 24 = 64K, pages 25-39 = 128K
+ *
+ * The application deliberately lives entirely within BANK 0, leaving the whole of bank 1 free:
+ *
+ *   BOOTLOADER: page 0      (16K),   0x08000000-0x08003FFF
+ *   CONFIG:     pages 1-2   (32K),   0x08004000-0x0800BFFF
+ *   FLASH:      pages 3-19  (2000K), 0x0800C000-0x081FFFFF
+ *   (reserved)  pages 20-39 (2048K), 0x08200000-0x083FFFFF  -- bank 1, for future OTA
+ *
+ * Keeping the image inside one bank leaves the door open for an A/B OTA scheme: a new image can
+ * be written into bank 1 while running from bank 0, then activated by flipping the BB (boot bank
+ * select) option bit rather than overwriting the running image. Do not spill the application into
+ * bank 1 without revisiting that plan.
+ *
+ * Earlier revisions of this file mapped only 976KB, which was an unexamined copy of the GD32F470
+ * layout (that part genuinely has just 1MB). ap_mode reached 89.8% of that region.
  *
  * RAM:    256KB @ 0x20000000 (F527 has 256KB vs F470's 192KB)
  * TCMRAM:  64KB @ 0x10000000
@@ -24,7 +40,9 @@ MEMORY
 {
   BOOTLOADER (rx) : ORIGIN = 0x08000000, LENGTH = 16K
   CONFIG     (r)  : ORIGIN = 0x08004000, LENGTH = 32K
-  FLASH      (rx) : ORIGIN = 0x0800C000, LENGTH = 976K
+  /* Rest of bank 0. Bank 1 (0x08200000, 2048K) is deliberately left unmapped and unused so it
+   * stays available for an A/B OTA image -- see the header comment. */
+  FLASH      (rx) : ORIGIN = 0x0800C000, LENGTH = 2000K
   RAM        (xrw): ORIGIN = 0x20000000, LENGTH = 256K
   TCMRAM     (xrw): ORIGIN = 0x10000000, LENGTH = 64K
 }
