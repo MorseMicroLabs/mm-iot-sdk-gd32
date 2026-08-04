@@ -62,7 +62,6 @@ static mmtrace_channel cmd53_read_fsm_channel_handle;
 
 #define MAX_BUS_ATTEMPTS (200)
 
-
 struct MM_PACKED sdio_spi_r5
 {
     uint8_t status;

@@ -5,6 +5,7 @@
 
 #include "umac_core_private.h"
 #include "mmlog.h"
+#include "mmosal.h"
 #include "umac/datapath/umac_datapath.h"
 #include "umac/stats/umac_stats.h"
 

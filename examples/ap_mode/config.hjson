@@ -30,13 +30,13 @@
      * this is equivalent to the write-string command */
     "strings" : {
         /* The Wi-Fi SSID */
-        "wlan.ssid": "MorseMicro"
+        "wlan.ssid": "GD32F470"
         /* The Wi-Fi password, not required if wlan.security is open */
         "wlan.password": "12345678"
         /* The Wi-Fi security to use, valid values are sae, owe and open */
         "wlan.security": "sae"
         /* The 2 letter country code to ensure the correct regulatory domain is used */
-        // "wlan.country_code": "XX"
+        "wlan.country_code": "AU"
 
         /* If true use DHCP, else the static IP configuration will be used */
         "ip.dhcp_enabled": "false"
@@ -120,7 +120,7 @@
 
         /* The following settings are required only for the ap_mode app */
         /* The Wi-Fi SSID to use for the AP interface. */
-        "wlan.ap_ssid": "MorseMicroIoT"
+        "wlan.ap_ssid": "GD32F470"
         /* The Wi-Fi password to use for the AP interface, not required if wlan.ap_security
          * is open. */
         "wlan.ap_password": "12345678"
@@ -133,10 +133,10 @@
         // "wlan.ap_bssid": "00:00:00:00:00:00"
         /* Operating Class (S1G or Global) to use for the AP interface. This together with
          * S1G_CHANNEL must correspond to a channel in the regulatory database. */
-        "wlan.ap_op_class": "71"
+        "wlan.ap_op_class": "49"
         /* S1G Channel to use for the AP interface. This together with OP_CLASS must
          * correspond to a channel in the regulatory database. */
-        "wlan.ap_s1g_chan_num": "44"
+        "wlan.ap_s1g_chan_num": "55"
         /* Primary Bandwidth to use for the AP interface. Valid values:
          *   * 0 (auto)
          *   * 1
@@ -174,7 +174,7 @@
          * `mf08551` with the appropriate value for the module that you have. For example,
          * if your module were MM6108-MF12345 then you would change the value of this key
          * to: $MMIOT_ROOT/morsefirmware/mm6108/bcfs/bcf_mf12345.mbin */
-        // "bcf_file": "$MMIOT_ROOT/morsefirmware/mm6108/bcfs/bcf_mf08651_us.mbin"
+        "bcf_file": "$MMIOT_ROOT/morsefirmware/mm8108/bcfs/bcf_mf15457.mbin"
 
         
     }

@@ -1465,7 +1465,6 @@ int mmconfig_read_uint32(const char *key, uint32_t *value)
     {
         return MMCONFIG_ERR_NOT_SUPPORTED;
     }
-
     mmosal_mutex_get(mmconfig_mutex, UINT32_MAX);
 
     int retval = mmconfig_read_data(key, (const void **)&data);
