@@ -9,6 +9,7 @@
  */
 
 #include "mmhal_flash.h"
+#include "mmhal_fs.h"
 
 const struct lfs_config *mmhal_get_littlefs_config(void)
 {

@@ -32,6 +32,13 @@ BUILD_DEFINES += MMHAL_CHIP_TYPE=$(MMHAL_CHIP_TYPE)
 
 FW_MBIN ?= mm8108b2-rl.mbin
 
+# If mmconfig has been excluded from the build the BCF file must be compiled into the application.
+# BCF_MBIN_REL is specified here so morsefirmware.mk can include the correct file.
+# Customers / consumers can override by specifying BCF_MBIN. See morsefirmware.mk
+ifeq ($(EXCLUDE_MMCONFIG),1)
+BCF_MBIN_REL ?= mm8108/bcfs/bcf_mf15457.mbin
+endif
+
 # Platform specific files
 BSP_DIR = $(PLATFORM_PATH)/bsp
 

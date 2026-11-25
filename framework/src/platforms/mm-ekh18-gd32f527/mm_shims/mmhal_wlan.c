@@ -13,11 +13,14 @@
  */
 
 #include "mmhal_wlan.h"
+#include "mmlog.h"
 #include "mmosal.h"
-#include "mmconfig.h"
 #include "mmutils.h"
-
 #include "main.h"
+
+#ifndef EXCLUDE_MMCONFIG
+#include "mmconfig.h"
+#endif
 
 #define BYTE_TRAIN 16
 MM_STATIC_ASSERT((BYTE_TRAIN >= 10), "BYTE_TRAIN must be at least 10.");
@@ -379,42 +382,28 @@ static void generate_stable_mac_addr_from_uid(uint8_t *mac_addr)
     mac_addr[0] = 0x02;
     mac_addr[1] = 0x00;
     memcpy(&mac_addr[2], &uid_word, sizeof(uid_word));
-}
-
-static void get_mmconfig_mac_addr(uint8_t *mac_addr)
-{
-    char strval[32];
-    if (mmconfig_read_string("wlan.macaddr", strval, sizeof(strval)) > 0)
-    {
-        int temp[MMWLAN_MAC_ADDR_LEN];
-        uint8_t validated_mac[MMWLAN_MAC_ADDR_LEN];
-        int i;
-
-        int ret = sscanf(strval,
-                         "%x:%x:%x:%x:%x:%x",
-                         &temp[0], &temp[1], &temp[2],
-                         &temp[3], &temp[4], &temp[5]);
-        if (ret == MMWLAN_MAC_ADDR_LEN)
-        {
-            for (i = 0; i < MMWLAN_MAC_ADDR_LEN; i++)
-            {
-                if (temp[i] > UINT8_MAX || temp[i] < 0)
-                {
-                    printf("Invalid MAC address found in [wlan.macaddr], rejecting!\n");
-                    return;
-                }
-                validated_mac[i] = (uint8_t)temp[i];
-            }
-            memcpy(mac_addr, validated_mac, MMWLAN_MAC_ADDR_LEN);
-        }
-    }
+    MMOSAL_DEV_ASSERT(mm_mac_addr_is_valid_sta(mac_addr));
 }
 
 void mmhal_read_mac_addr(uint8_t *mac_addr)
 {
-    get_mmconfig_mac_addr(mac_addr);
+#ifndef EXCLUDE_MMCONFIG
+    /* Read from mmconfig into a temporary as we only override the value in mac_addr once the
+     * mmconfig MAC has been validated in case mac_addr already contains a MAC address. */
+    uint8_t macval[MMWLAN_MAC_ADDR_LEN];
+    if (mmconfig_read_mac_addr("wlan.macaddr", macval) == MMCONFIG_OK)
+    {
+        if (mm_mac_addr_is_valid_sta(macval))
+        {
+            memcpy(mac_addr, macval, MMWLAN_MAC_ADDR_LEN);
+            return;
+        }
+        MMLOG_ERR("Rejecting invalid MAC address from mmconfig wlan.macaddr: " MM_MAC_ADDR_FMT "\n",
+                  MM_MAC_ADDR_VAL(macval));
+    }
+#endif
 
-    if (!mm_mac_addr_is_zero(mac_addr))
+    if (mm_mac_addr_is_valid_sta(mac_addr))
     {
         return;
     }
