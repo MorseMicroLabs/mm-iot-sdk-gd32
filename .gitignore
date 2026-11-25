@@ -18,5 +18,13 @@ framework/.pipenv-synced
 /GD32_ISP_CLI/
 /GD32F4xx_Firmware_Library_V3.3.3/
 
+# Local per-board config-store overlays. These hold the BCF path and live Wi-Fi
+# credentials, which are per-site configuration and must never be committed -- the
+# tracked example config.hjson files deliberately keep placeholders instead.
+# See framework/src/platforms/mm-ekh18-gd32f527/bringup-quickstart.md
+/bcf-local.hjson
+/bcf-only.hjson
+*-local.hjson
+
 # Scratch
 debug_threads_output.txt
